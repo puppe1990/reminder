@@ -7,6 +7,7 @@ CLI em Ruby para criar lembretes no macOS com notificacao nativa.
 ```bash
 ./reminder add --text "Reuniao com cliente" --at "2026-04-23 15:00"
 ./reminder add --text "Sair para o medico" --at "2026-04-23 18:00" --warn 30m
+./reminder add --text "Tomar remedio" --at "2026-04-23 08:00" --warn 15m --repeat daily
 ./reminder list
 ./reminder remove <id>
 ```
@@ -19,6 +20,10 @@ CLI em Ruby para criar lembretes no macOS com notificacao nativa.
   - `15m` = 15 minutos
   - `2h` = 2 horas
   - `1d` = 1 dia
+- `--repeat`:
+  - `daily`
+  - `weekly`
+  - `monthly`
 
 ## Como funciona
 
@@ -26,6 +31,7 @@ CLI em Ruby para criar lembretes no macOS com notificacao nativa.
 - Cria `LaunchAgents` em `~/Library/LaunchAgents`
 - Exibe a notificacao com `osascript`
 - Prefere `terminal-notifier` quando estiver instalado para banners mais consistentes no macOS
+- Quando `--repeat` e usado, reagenda automaticamente o proximo disparo apos o lembrete principal
 - Usa `launchd`, `osascript`, `minitest` e `rubocop`
 
 ## Setup

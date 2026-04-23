@@ -57,6 +57,17 @@ class ReminderCLITest < Minitest::Test
     assert_match('Use minutos inteiros', error.message)
   end
 
+  def test_parse_repeat_supports_daily_weekly_and_monthly
+    assert_equal 'daily', ReminderCLI.parse_repeat('daily')
+    assert_equal 'weekly', ReminderCLI.parse_repeat('weekly')
+    assert_equal 'monthly', ReminderCLI.parse_repeat('monthly')
+  end
+
+  def test_parse_repeat_rejects_invalid_values
+    error = assert_raises(ReminderCLI::Error) { ReminderCLI.parse_repeat('yearly') }
+    assert_match('Use daily, weekly ou monthly', error.message)
+  end
+
   def test_parse_datetime_accepts_space_and_t_separator
     assert_equal Time.parse('2026-04-23 15:00:00'), ReminderCLI.parse_datetime('2026-04-23 15:00')
     assert_equal Time.parse('2026-04-23 15:00:00'), ReminderCLI.parse_datetime('2026-04-23T15:00')
@@ -169,6 +180,30 @@ class ReminderCLITest < Minitest::Test
     assert_match('Aviso previo: 2026-04-23 14:30 (30m antes)', stdout.string)
   end
 
+  def test_add_command_persists_repeat_and_prints_it
+    created_agents = []
+    stdout = StringIO.new
+
+    with_overridden_methods(
+      create_launch_agent: lambda do |id, at_time, phase|
+        created_agents << [id, at_time.strftime('%Y-%m-%d %H:%M'), phase]
+        "label-#{phase}"
+      end
+    ) do
+      reminder = ReminderCLI.add_command(
+        ['--text', 'Tomar remedio', '--at', '2026-04-23 15:00', '--warn', '30m', '--repeat', 'weekly'],
+        stdout: stdout
+      )
+
+      assert_equal 'weekly', reminder['repeat']
+    end
+
+    saved = ReminderCLI.load_db.first
+    assert_equal 'weekly', saved['repeat']
+    assert_equal [['fixed123', '2026-04-23 15:00', 'main'], ['fixed123', '2026-04-23 14:30', 'warn']], created_agents
+    assert_match('Repeticao: weekly', stdout.string)
+  end
+
   def test_add_command_rejects_warning_that_falls_in_past
     error = assert_raises(ReminderCLI::Error) do
       ReminderCLI.add_command(['--text', 'Teste', '--at', '2026-04-23 13:10', '--warn', '15m'], stdout: StringIO.new)
@@ -183,13 +218,15 @@ class ReminderCLITest < Minitest::Test
                             'id' => 'a1',
                             'text' => 'Primeiro',
                             'scheduled_at' => '2026-04-23T14:00:00',
-                            'warning_at' => nil
+                            'warning_at' => nil,
+                            'repeat' => nil
                           },
                           {
                             'id' => 'b2',
                             'text' => 'Segundo',
                             'scheduled_at' => '2026-04-23T13:30:00',
-                            'warning_at' => '2026-04-23T13:15:00'
+                            'warning_at' => '2026-04-23T13:15:00',
+                            'repeat' => 'daily'
                           }
                         ])
 
@@ -197,7 +234,7 @@ class ReminderCLITest < Minitest::Test
     ReminderCLI.list_command([], stdout: stdout)
 
     lines = stdout.string.lines.map(&:strip)
-    assert_equal 'b2 | 2026-04-23 13:30:00 | aviso: 2026-04-23 13:15:00 | Segundo', lines[0]
+    assert_equal 'b2 | 2026-04-23 13:30:00 | aviso: 2026-04-23 13:15:00 | repete: daily | Segundo', lines[0]
     assert_equal 'a1 | 2026-04-23 14:00:00 | Primeiro', lines[1]
   end
 
@@ -279,5 +316,79 @@ class ReminderCLITest < Minitest::Test
     assert_equal [], ReminderCLI.load_db
     assert_equal [['Reminder CLI', 'Agora', 'Hora da reuniao']], notifications
     assert_equal ['label-main'], deleted
+  end
+
+  def test_trigger_main_reschedules_daily_reminder
+    ReminderCLI.save_db([
+                          {
+                            'id' => 'main1',
+                            'text' => 'Alongar',
+                            'scheduled_at' => '2026-04-23T15:00:00',
+                            'warning_seconds' => 1800,
+                            'warning_at' => '2026-04-23T14:30:00',
+                            'repeat' => 'daily',
+                            'main_label' => 'label-main',
+                            'warn_label' => 'label-warn'
+                          }
+                        ])
+
+    notifications = []
+    deleted = []
+    created_agents = []
+
+    with_overridden_methods(
+      send_notification: ->(*args) { notifications << args },
+      delete_plist: ->(label) { deleted << label },
+      create_launch_agent: lambda do |id, at_time, phase|
+        created_agents << [id, at_time.strftime('%Y-%m-%d %H:%M'), phase]
+        "new-#{phase}"
+      end
+    ) do
+      ReminderCLI.trigger_command(%w[main1 main])
+    end
+
+    saved = ReminderCLI.load_db.first
+    assert_equal [['Reminder CLI', 'Agora', 'Alongar']], notifications
+    assert_equal %w[label-main label-warn], deleted
+    assert_equal [['main1', '2026-04-24 15:00', 'main'], ['main1', '2026-04-24 14:30', 'warn']], created_agents
+    assert_equal '2026-04-24T15:00:00', saved['scheduled_at']
+    assert_equal '2026-04-24T14:30:00', saved['warning_at']
+    assert_equal 'new-main', saved['main_label']
+    assert_equal 'new-warn', saved['warn_label']
+    assert_equal 'daily', saved['repeat']
+  end
+
+  def test_trigger_main_reschedules_monthly_reminder_to_last_valid_day
+    ReminderCLI.save_db([
+                          {
+                            'id' => 'month1',
+                            'text' => 'Fechar fatura',
+                            'scheduled_at' => '2026-01-31T15:00:00',
+                            'warning_seconds' => 0,
+                            'warning_at' => nil,
+                            'repeat' => 'monthly',
+                            'main_label' => 'label-main',
+                            'warn_label' => nil
+                          }
+                        ])
+
+    created_agents = []
+
+    with_overridden_methods(
+      send_notification: ->(*_args) {},
+      delete_plist: ->(_label) {},
+      create_launch_agent: lambda do |id, at_time, phase|
+        created_agents << [id, at_time.strftime('%Y-%m-%d %H:%M'), phase]
+        "new-#{phase}"
+      end
+    ) do
+      ReminderCLI.trigger_command(%w[month1 main])
+    end
+
+    saved = ReminderCLI.load_db.first
+    assert_equal [['month1', '2026-02-28 15:00', 'main']], created_agents
+    assert_equal '2026-02-28T15:00:00', saved['scheduled_at']
+    assert_nil saved['warning_at']
+    assert_equal 'monthly', saved['repeat']
   end
 end

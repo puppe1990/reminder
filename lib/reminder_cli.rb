@@ -6,6 +6,7 @@ require 'optparse'
 require 'open3'
 require 'time'
 require 'securerandom'
+require 'date'
 
 module ReminderCLI
   class Error < StandardError; end
@@ -117,6 +118,13 @@ module ReminderCLI
     unit = match[2]
     multiplier = { 'm' => 60, 'h' => 3600, 'd' => 86_400 }.fetch(unit)
     amount * multiplier
+  end
+
+  def self.parse_repeat(value)
+    repeat = value.to_s.strip.downcase
+    return repeat if %w[daily weekly monthly].include?(repeat)
+
+    raise Error, 'Use daily, weekly ou monthly para repeticao.'
   end
 
   def self.now_local
@@ -290,13 +298,61 @@ module ReminderCLI
     "#{seconds / 60} minutos"
   end
 
+  def self.next_scheduled_at(scheduled_at, repeat)
+    case repeat
+    when 'daily'
+      scheduled_at + 86_400
+    when 'weekly'
+      scheduled_at + (7 * 86_400)
+    when 'monthly'
+      next_month_date = Date.new(scheduled_at.year, scheduled_at.month, 1) >> 1
+      last_day = Date.new(next_month_date.year, next_month_date.month, -1).day
+      day = [scheduled_at.day, last_day].min
+      Time.new(
+        next_month_date.year, next_month_date.month, day,
+        scheduled_at.hour, scheduled_at.min, scheduled_at.sec, scheduled_at.utc_offset
+      )
+    else
+      raise Error, "Repeticao invalida: #{repeat}"
+    end
+  end
+
+  def self.reschedule_recurring_reminder(reminder)
+    scheduled_at = Time.parse(reminder['scheduled_at'])
+    next_at = next_scheduled_at(scheduled_at, reminder['repeat'])
+    warning_seconds = reminder['warning_seconds'].to_i
+    warning_at = warning_seconds.positive? ? next_at - warning_seconds : nil
+
+    cleanup_reminder_jobs(reminder)
+
+    reminder['scheduled_at'] = isoformat_local(next_at)
+    reminder['warning_at'] = warning_at ? isoformat_local(warning_at) : nil
+    reminder['main_label'] = create_launch_agent(reminder['id'], next_at, 'main')
+    reminder['warn_label'] = warning_at ? create_launch_agent(reminder['id'], warning_at, 'warn') : nil
+    reminder
+  end
+
+  def self.print_add_summary(stdout, reminder, scheduled_at, warning_at, warn_value)
+    stdout.puts "Reminder criado: #{reminder['id']}"
+    stdout.puts "Texto: #{reminder['text']}"
+    stdout.puts "Horario: #{scheduled_at.strftime('%Y-%m-%d %H:%M')}"
+    if reminder['warning_seconds'].positive?
+      stdout.puts "Aviso previo: #{warning_at.strftime('%Y-%m-%d %H:%M')} (#{warn_value} antes)"
+    end
+    stdout.puts "Repeticao: #{reminder['repeat']}" if reminder['repeat']
+  end
+
   def self.add_command(argv, stdout: $stdout)
     options = {}
     parser = OptionParser.new do |opts|
-      opts.banner = 'Uso: ./reminder add --text "..." --at "YYYY-MM-DD HH:MM" [--warn 15m]'
+      opts.banner = [
+        'Uso: ./reminder add --text "..." --at "YYYY-MM-DD HH:MM"',
+        '[--warn 15m] [--repeat daily|weekly|monthly]'
+      ].join(' ')
       opts.on('--text TEXT', 'Texto da notificacao') { |value| options[:text] = value }
       opts.on('--at DATETIME', 'Horario: YYYY-MM-DD HH:MM') { |value| options[:at] = value }
       opts.on('--warn DURATION', 'Aviso previo: 15, 15m, 2h, 1d') { |value| options[:warn] = value }
+      opts.on('--repeat REPEAT', 'Repeticao: daily, weekly, monthly') { |value| options[:repeat] = value }
     end
     parser.parse!(argv)
 
@@ -306,6 +362,7 @@ module ReminderCLI
     raise Error, 'O horario precisa estar no futuro.' unless scheduled_at > now_local
 
     warning_seconds = options[:warn] ? parse_duration(options[:warn]) : 0
+    repeat = options[:repeat] ? parse_repeat(options[:repeat]) : nil
     warning_at = scheduled_at - warning_seconds
     if warning_seconds.positive? && warning_at <= now_local
       raise Error, 'O aviso previo cai no passado. Use um intervalo menor.'
@@ -322,6 +379,7 @@ module ReminderCLI
       'scheduled_at' => isoformat_local(scheduled_at),
       'warning_seconds' => warning_seconds,
       'warning_at' => warning_seconds.positive? ? isoformat_local(warning_at) : nil,
+      'repeat' => repeat,
       'created_at' => isoformat_local(now_local),
       'main_label' => main_label,
       'warn_label' => warn_label
@@ -330,12 +388,7 @@ module ReminderCLI
     items << reminder
     save_db(items)
 
-    stdout.puts "Reminder criado: #{reminder_id}"
-    stdout.puts "Texto: #{reminder['text']}"
-    stdout.puts "Horario: #{scheduled_at.strftime('%Y-%m-%d %H:%M')}"
-    if warning_seconds.positive?
-      stdout.puts "Aviso previo: #{warning_at.strftime('%Y-%m-%d %H:%M')} (#{options[:warn]} antes)"
-    end
+    print_add_summary(stdout, reminder, scheduled_at, warning_at, options[:warn])
     reminder
   end
 
@@ -348,7 +401,8 @@ module ReminderCLI
 
     items.each do |item|
       warn_suffix = item['warning_at'] ? " | aviso: #{item['warning_at'].tr('T', ' ')}" : ''
-      stdout.puts "#{item['id']} | #{item['scheduled_at'].tr('T', ' ')}#{warn_suffix} | #{item['text']}"
+      repeat_suffix = item['repeat'] ? " | repete: #{item['repeat']}" : ''
+      stdout.puts "#{item['id']} | #{item['scheduled_at'].tr('T', ' ')}#{warn_suffix}#{repeat_suffix} | #{item['text']}"
     end
     items
   end
@@ -393,6 +447,13 @@ module ReminderCLI
     end
 
     send_notification(APP_TITLE, 'Agora', reminder['text'])
+    if reminder['repeat']
+      reminder = reschedule_recurring_reminder(reminder)
+      items[index] = reminder
+      save_db(items)
+      return reminder
+    end
+
     cleanup_reminder_jobs(reminder)
     items.delete_at(index)
     save_db(items)
@@ -402,7 +463,7 @@ module ReminderCLI
   def self.usage
     <<~TEXT
       Uso:
-        ./reminder add --text "..." --at "YYYY-MM-DD HH:MM" [--warn 15m]
+        ./reminder add --text "..." --at "YYYY-MM-DD HH:MM" [--warn 15m] [--repeat daily|weekly|monthly]
         ./reminder list
         ./reminder remove <id>
     TEXT
