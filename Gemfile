@@ -2,7 +2,5 @@
 
 source 'https://rubygems.org'
 
-ruby '4.0.2'
-
 gem 'minitest'
 gem 'rubocop', require: false
