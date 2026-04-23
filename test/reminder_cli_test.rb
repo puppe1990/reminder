@@ -100,6 +100,14 @@ class ReminderCLITest < Minitest::Test
 
   def test_send_notification_prefers_terminal_notifier_when_available
     commands = []
+    expected_command = [
+      'terminal-notifier',
+      '-title', 'Reminder CLI',
+      '-subtitle', 'Agora',
+      '-message', 'Teste visual',
+      '-sound', 'Glass',
+      '-group', 'com.codex.reminder'
+    ]
 
     with_overridden_methods(
       command_available?: ->(command) { command == 'terminal-notifier' },
@@ -111,7 +119,7 @@ class ReminderCLITest < Minitest::Test
       ReminderCLI.send_notification('Reminder CLI', 'Agora', 'Teste visual')
     end
 
-    assert_equal [['terminal-notifier', '-title', 'Reminder CLI', '-subtitle', 'Agora', '-message', 'Teste visual', '-sound', 'Glass', '-group', 'com.codex.reminder']], commands
+    assert_equal [expected_command], commands
   end
 
   def test_send_notification_falls_back_to_apple_script

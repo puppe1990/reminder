@@ -52,9 +52,13 @@ module ReminderCLI
   end
 
   def self.install_runtime_files
+    script_already_installed = File.identical?(SOURCE_SCRIPT_PATH, runtime_script_path)
+    lib_already_installed = File.identical?(SOURCE_LIB_PATH, runtime_lib_path)
+
     FileUtils.mkdir_p(runtime_lib_dir)
-    FileUtils.cp(SOURCE_SCRIPT_PATH, runtime_script_path) unless File.identical?(SOURCE_SCRIPT_PATH, runtime_script_path)
-    FileUtils.cp(SOURCE_LIB_PATH, runtime_lib_path) unless File.identical?(SOURCE_LIB_PATH, runtime_lib_path)
+    FileUtils.cp(SOURCE_SCRIPT_PATH, runtime_script_path) unless script_already_installed
+    FileUtils.cp(SOURCE_LIB_PATH, runtime_lib_path) unless lib_already_installed
+
     FileUtils.chmod(0o755, runtime_script_path)
   end
 
@@ -235,7 +239,10 @@ module ReminderCLI
       '-sound', 'Glass',
       '-group', 'com.codex.reminder'
     )
-    raise Error, (output.strip.empty? ? 'Falha ao enviar notificacao via terminal-notifier.' : output.strip) unless status.zero?
+    return if status.zero?
+
+    error_message = output.strip.empty? ? 'Falha ao enviar notificacao via terminal-notifier.' : output.strip
+    raise Error, error_message
   end
 
   def self.send_apple_script_notification(title, subtitle, message)
