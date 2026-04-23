@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+bundle exec ruby -Itest test/reminder_cli_test.rb
