@@ -25,6 +25,7 @@ CLI em Ruby para criar lembretes no macOS com notificacao nativa.
 - Salva os lembretes em `~/.reminder-cli/reminders.json`
 - Cria `LaunchAgents` em `~/Library/LaunchAgents`
 - Exibe a notificacao com `osascript`
+- Prefere `terminal-notifier` quando estiver instalado para banners mais consistentes no macOS
 - Usa `launchd`, `osascript`, `minitest` e `rubocop`
 
 ## Setup

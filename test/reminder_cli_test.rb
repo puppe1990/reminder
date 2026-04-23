@@ -73,6 +73,66 @@ class ReminderCLITest < Minitest::Test
     assert_includes xml, '<integer>45</integer>'
   end
 
+  def test_ensure_dirs_installs_runtime_files_inside_app_dir
+    ReminderCLI.reset_configuration!
+    ReminderCLI.app_dir = @app_dir
+    ReminderCLI.launch_agents_dir = @launch_agents_dir
+    ReminderCLI.time_source = -> { @fixed_now }
+    ReminderCLI.id_generator = -> { 'fixed123' }
+
+    ReminderCLI.ensure_dirs
+
+    assert_equal File.join(@app_dir, 'runtime', 'reminder'), ReminderCLI.script_path
+    assert File.exist?(ReminderCLI.script_path)
+    assert File.exist?(File.join(@app_dir, 'runtime', 'lib', 'reminder_cli.rb'))
+    assert File.executable?(ReminderCLI.script_path)
+  end
+
+  def test_create_launch_agent_requires_executable_script
+    ReminderCLI.script_path = '/tmp/not-executable'
+
+    error = assert_raises(ReminderCLI::Error) do
+      ReminderCLI.create_launch_agent('abc123', Time.parse('2026-04-23 15:45:00'), 'main')
+    end
+
+    assert_equal 'Script do reminder nao e executavel: /tmp/not-executable', error.message
+  end
+
+  def test_send_notification_prefers_terminal_notifier_when_available
+    commands = []
+
+    with_overridden_methods(
+      command_available?: ->(command) { command == 'terminal-notifier' },
+      run_command: lambda do |*args|
+        commands << args
+        ['', 0]
+      end
+    ) do
+      ReminderCLI.send_notification('Reminder CLI', 'Agora', 'Teste visual')
+    end
+
+    assert_equal [['terminal-notifier', '-title', 'Reminder CLI', '-subtitle', 'Agora', '-message', 'Teste visual', '-sound', 'Glass', '-group', 'com.codex.reminder']], commands
+  end
+
+  def test_send_notification_falls_back_to_apple_script
+    commands = []
+
+    with_overridden_methods(
+      command_available?: ->(_command) { false },
+      run_command: lambda do |*args|
+        commands << args
+        ['', 0]
+      end
+    ) do
+      ReminderCLI.send_notification('Reminder CLI', 'Agora', 'Teste visual')
+    end
+
+    assert_equal 'osascript', commands.first[0]
+    assert_equal '-e', commands.first[1]
+    assert_includes commands.first[2], 'display notification'
+    assert_includes commands.first[2], 'Teste visual'
+  end
+
   def test_add_command_persists_reminder_and_creates_agents
     created_agents = []
     stdout = StringIO.new

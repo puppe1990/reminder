@@ -6,10 +6,12 @@ require 'optparse'
 require 'open3'
 require 'time'
 require 'securerandom'
-require 'rbconfig'
 
 module ReminderCLI
   class Error < StandardError; end
+
+  SOURCE_SCRIPT_PATH = File.expand_path(File.join(__dir__, '..', 'reminder'))
+  SOURCE_LIB_PATH = File.expand_path(__FILE__)
 
   class << self
     attr_writer :app_dir, :launch_agents_dir, :script_path, :time_source, :id_generator
@@ -25,12 +27,35 @@ module ReminderCLI
     File.join(app_dir, 'reminders.json')
   end
 
+  def self.runtime_dir
+    File.join(app_dir, 'runtime')
+  end
+
+  def self.runtime_lib_dir
+    File.join(runtime_dir, 'lib')
+  end
+
+  def self.runtime_script_path
+    File.join(runtime_dir, 'reminder')
+  end
+
+  def self.runtime_lib_path
+    File.join(runtime_lib_dir, 'reminder_cli.rb')
+  end
+
   def self.launch_agents_dir
     @launch_agents_dir ||= File.join(Dir.home, 'Library', 'LaunchAgents')
   end
 
   def self.script_path
-    @script_path ||= File.expand_path(File.join(__dir__, '..', 'reminder'))
+    @script_path ||= runtime_script_path
+  end
+
+  def self.install_runtime_files
+    FileUtils.mkdir_p(runtime_lib_dir)
+    FileUtils.cp(SOURCE_SCRIPT_PATH, runtime_script_path) unless File.identical?(SOURCE_SCRIPT_PATH, runtime_script_path)
+    FileUtils.cp(SOURCE_LIB_PATH, runtime_lib_path) unless File.identical?(SOURCE_LIB_PATH, runtime_lib_path)
+    FileUtils.chmod(0o755, runtime_script_path)
   end
 
   def self.time_source
@@ -52,6 +77,7 @@ module ReminderCLI
   def self.ensure_dirs
     FileUtils.mkdir_p(app_dir)
     FileUtils.mkdir_p(launch_agents_dir)
+    install_runtime_files if @script_path.nil?
     File.write(db_path, "[\n]\n") unless File.exist?(db_path)
   end
 
@@ -114,6 +140,11 @@ module ReminderCLI
     [(stdout + stderr), status.exitstatus]
   end
 
+  def self.command_available?(command)
+    _output, status = run_command('which', command)
+    status.zero?
+  end
+
   def self.bootout_label(label)
     run_command('launchctl', 'bootout', "#{uid_domain}/#{label}")
   end
@@ -135,6 +166,8 @@ module ReminderCLI
   end
 
   def self.create_launch_agent(reminder_id, at_time, phase)
+    raise Error, "Script do reminder nao e executavel: #{script_path}" unless File.executable?(script_path)
+
     label = label_for(reminder_id, phase)
     path = plist_path(label)
     File.write(path, launch_agent_plist(label, reminder_id, at_time, phase))
@@ -165,7 +198,7 @@ module ReminderCLI
         <string>#{xml_escape(label)}</string>
         <key>ProgramArguments</key>
         <array>
-      #{plist_array([RbConfig.ruby, script_path, '_trigger', reminder_id, phase])}
+      #{plist_array([script_path, '_trigger', reminder_id, phase])}
         </array>
         <key>StartCalendarInterval</key>
         <dict>
@@ -193,7 +226,20 @@ module ReminderCLI
     "\"#{value.to_s.gsub('\\', '\\\\\\').gsub('"', '\"')}\""
   end
 
-  def self.send_notification(title, subtitle, message)
+  def self.send_terminal_notification(title, subtitle, message)
+    output, status = run_command(
+      'terminal-notifier',
+      '-title', title.to_s,
+      '-subtitle', subtitle.to_s,
+      '-message', message.to_s,
+      '-sound', 'Glass',
+      '-group', 'com.codex.reminder'
+    )
+    raise Error, (output.strip.empty? ? 'Falha ao enviar notificacao via terminal-notifier.' : output.strip) unless status.zero?
+  end
+
+  def self.send_apple_script_notification(title, subtitle, message)
+    # Fallback nativo do macOS quando terminal-notifier nao estiver instalado.
     script = [
       'display notification',
       apple_script_string(message),
@@ -205,6 +251,14 @@ module ReminderCLI
     ].join(' ')
     output, status = run_command('osascript', '-e', script)
     raise Error, (output.strip.empty? ? 'Falha ao enviar notificacao no macOS.' : output.strip) unless status.zero?
+  end
+
+  def self.send_notification(title, subtitle, message)
+    if command_available?('terminal-notifier')
+      send_terminal_notification(title, subtitle, message)
+    else
+      send_apple_script_notification(title, subtitle, message)
+    end
   end
 
   def self.find_reminder(items, reminder_id)
